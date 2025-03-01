@@ -7,6 +7,7 @@
 use std::{
     ffi::{c_int, c_uchar, c_uint, c_void},
     marker::PhantomData,
+    slice,
 };
 
 use rustix::{
@@ -226,7 +227,24 @@ pub struct Urb {
     pub error_count: c_int,
     pub signr: c_uint,
     pub usercontext: *mut c_void,
-    // + variable size array of iso_packet_desc
+    pub iso_frame_desc: [IsoPacketDesc; 0],
+}
+
+impl Urb {
+    pub unsafe fn iso_packet_descriptors(&self) -> &[IsoPacketDesc] {
+        slice::from_raw_parts(
+            self.iso_frame_desc.as_ptr(),
+            self.number_of_packets_or_stream_id as usize,
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct IsoPacketDesc {
+    pub length: c_uint,
+    pub actual_length: c_uint,
+    pub status: c_uint,
 }
 
 pub struct Transfer<Opcode, Input> {

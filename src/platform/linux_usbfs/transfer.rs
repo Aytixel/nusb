@@ -2,21 +2,23 @@ use std::{
     ffi::c_void,
     mem::{self, ManuallyDrop},
     ptr::null_mut,
+    slice,
     sync::Arc,
 };
 
+use libc::realloc;
 use rustix::io::Errno;
 
 use crate::transfer::{
     Completion, ControlIn, ControlOut, PlatformSubmit, PlatformTransfer, RequestBuffer,
-    ResponseBuffer, TransferError, TransferType, SETUP_PACKET_SIZE,
+    RequestIsochronousBuffer, ResponseBuffer, TransferError, TransferType, SETUP_PACKET_SIZE,
 };
 
 use super::{
     errno_to_transfer_error,
     usbfs::{
-        Urb, USBDEVFS_URB_TYPE_BULK, USBDEVFS_URB_TYPE_CONTROL, USBDEVFS_URB_TYPE_INTERRUPT,
-        USBDEVFS_URB_TYPE_ISO,
+        IsoPacketDesc, Urb, USBDEVFS_URB_TYPE_BULK, USBDEVFS_URB_TYPE_CONTROL,
+        USBDEVFS_URB_TYPE_INTERRUPT, USBDEVFS_URB_TYPE_ISO,
     },
 };
 
@@ -66,6 +68,7 @@ impl TransferData {
                 error_count: 0,
                 signr: 0,
                 usercontext: null_mut(),
+                iso_frame_desc: [],
             })),
             capacity: 0,
             device,
@@ -76,6 +79,28 @@ impl TransferData {
     fn urb_mut(&mut self) -> &mut Urb {
         // SAFETY: if we have `&mut`, the transfer is not pending
         unsafe { &mut *self.urb }
+    }
+
+    fn urb_setup_iso_packet_descriptors(&mut self, number_of_packets: usize, requested: usize) {
+        unsafe {
+            self.urb = realloc(
+                self.urb as *mut c_void,
+                size_of::<Urb>() + size_of::<IsoPacketDesc>() * number_of_packets,
+            ) as *mut Urb;
+
+            let urb = &mut *self.urb;
+
+            urb.number_of_packets_or_stream_id = number_of_packets as u32;
+
+            for iso_frame_desc in
+                slice::from_raw_parts_mut(urb.iso_frame_desc.as_mut_ptr(), number_of_packets)
+            {
+                assert!(requested <= u32::MAX as usize);
+                iso_frame_desc.length = requested as u32;
+                iso_frame_desc.actual_length = 0;
+                iso_frame_desc.status = 0;
+            }
+        }
     }
 
     fn fill(&mut self, v: Vec<u8>, len: usize, user_data: *mut c_void) {
@@ -159,6 +184,45 @@ impl PlatformSubmit<RequestBuffer> for TransferData {
 
         // SAFETY: self is completed (precondition) and `actual_length` bytes were initialized.
         let data = unsafe { self.take_buf(len) };
+        Completion { data, status }
+    }
+}
+
+impl PlatformSubmit<RequestIsochronousBuffer> for TransferData {
+    unsafe fn submit(&mut self, data: RequestIsochronousBuffer, user_data: *mut c_void) {
+        let ep = self.urb_mut().endpoint;
+        let ty = self.urb_mut().ep_type;
+        assert!(ep & 0x80 == 0x80);
+        assert!(ty == USBDEVFS_URB_TYPE_ISO);
+
+        self.urb_setup_iso_packet_descriptors(data.number_of_packets, data.requested);
+
+        let (data, len) = data.into_vec();
+        self.fill(data, len, user_data);
+
+        // SAFETY: we just properly filled the buffer and it is not already pending
+        unsafe { self.device.submit_urb(self.urb) }
+    }
+
+    unsafe fn take_completed(&mut self) -> Completion<Vec<Vec<u8>>> {
+        let status = urb_status(self.urb_mut());
+        let len = self.urb_mut().buffer_length as usize;
+
+        // SAFETY: self is completed (precondition) and `actual_length` bytes were initialized.
+        let buffer = unsafe { self.take_buf(len) };
+        let mut data_start = 0;
+        let mut data = Vec::new();
+
+        for iso_packet_descriptor in unsafe { self.urb_mut().iso_packet_descriptors() } {
+            if iso_packet_descriptor.status == 0 {
+                let range = data_start..data_start + iso_packet_descriptor.actual_length as usize;
+
+                data.push(buffer[range].to_vec());
+            }
+
+            data_start += iso_packet_descriptor.length as usize;
+        }
+
         Completion { data, status }
     }
 }

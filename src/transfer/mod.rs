@@ -19,6 +19,9 @@ pub use queue::Queue;
 mod buffer;
 pub use buffer::{RequestBuffer, ResponseBuffer};
 
+mod isochronous_buffer;
+pub use isochronous_buffer::RequestIsochronousBuffer;
+
 mod control;
 #[allow(unused)]
 pub(crate) use control::SETUP_PACKET_SIZE;

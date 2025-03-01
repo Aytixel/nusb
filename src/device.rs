@@ -5,8 +5,8 @@ use crate::{
     },
     platform,
     transfer::{
-        Control, ControlIn, ControlOut, Queue, RequestBuffer, TransferError, TransferFuture,
-        TransferType,
+        Control, ControlIn, ControlOut, Queue, RequestBuffer, RequestIsochronousBuffer,
+        TransferError, TransferFuture, TransferType,
     },
     DeviceInfo, Error, MaybeFuture, Speed,
 };
@@ -545,6 +545,29 @@ impl Interface {
     /// * An OUT endpoint address must have the top (`0x80`) bit clear.
     pub fn bulk_out_queue(&self, endpoint: u8) -> Queue<Vec<u8>> {
         Queue::new(self.backend.clone(), endpoint, TransferType::Bulk)
+    }
+
+    /// Submit a single **IN (device-to-host)** transfer on the specified **isochronous** endpoint.
+    ///
+    /// * The requested length must be a multiple of the endpoint's maximum packet size
+    /// * An IN endpoint address must have the top (`0x80`) bit set.
+    pub fn isochronous_in(
+        &self,
+        endpoint: u8,
+        buf: RequestIsochronousBuffer,
+    ) -> TransferFuture<RequestIsochronousBuffer> {
+        let mut t = self
+            .backend
+            .make_transfer(endpoint, TransferType::Isochronous);
+        t.submit(buf);
+        TransferFuture::new(t)
+    }
+
+    /// Create a queue for managing multiple **IN (device-to-host)** transfers on a **isochronous** endpoint.
+    ///
+    /// * An IN endpoint address must have the top (`0x80`) bit set.
+    pub fn isochronous_in_queue(&self, endpoint: u8) -> Queue<RequestIsochronousBuffer> {
+        Queue::new(self.backend.clone(), endpoint, TransferType::Isochronous)
     }
 
     /// Submit a single **IN (device-to-host)** transfer on the specified **interrupt** endpoint.
